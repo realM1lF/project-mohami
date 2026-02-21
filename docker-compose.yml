@@ -63,6 +63,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - CHROMA_PERSIST_DIR=/app/data/chroma
       - USE_ENHANCED_AGENT=true
+      - USE_INTELLIGENT_AGENT=${USE_INTELLIGENT_AGENT:-true}
     depends_on:
       - backend
       - redis

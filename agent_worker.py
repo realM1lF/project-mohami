@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-Agent Worker - Enhanced with Full Memory System.
+Agent Worker - Mohami KI-Mitarbeiter.
 
-This worker includes:
-1. Customer Context Memories (from markdown files)
-2. Git Repository Cache (Redis-based)
-3. Episodic Memory (ticket history as vectors)
-4. Soul & Rules (agent personality)
+Unterstützt zwei Modi:
+- INTELLIGENT (neu): Tool-Use Framework + 4-Schichten Memory
+- LEGACY (Fallback): Basis DeveloperAgent
 
 Usage:
     python agent_worker.py
 
 Environment variables:
+    USE_INTELLIGENT_AGENT - "true" für neuen Agent, "false" für Legacy (default: true)
     OPEN_ROUTER_API_KEY - OpenRouter API key for Kimi
     GITHUB_TOKEN - GitHub token for repo access
     REDIS_URL - Redis connection URL
     CHROMA_PERSIST_DIR - ChromaDB persistence directory
-    USE_ENHANCED_AGENT=true - Enable enhanced agent with memory (default: false)
+    USE_ENHANCED_AGENT - Legacy: Enable enhanced agent with memory (default: false)
 """
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, Any
 
 from dotenv import load_dotenv
 
@@ -38,27 +39,58 @@ from src.kanban.schemas import TicketUpdate
 from src.git_provider import GitHubProvider
 from src.llm import KimiClient
 
-# Check if we can use Enhanced Agent
-USE_ENHANCED = os.getenv("USE_ENHANCED_AGENT", "false").lower() == "true"
-ENHANCED_ERROR = None
+# ============================================================================
+# CONFIG SWITCH: Intelligent Agent vs Legacy
+# ============================================================================
+USE_INTELLIGENT_AGENT = os.getenv("USE_INTELLIGENT_AGENT", "true").lower() == "true"
 
-if USE_ENHANCED:
+# Track import errors for logging
+INTELLIGENT_ERROR: Optional[str] = None
+ENHANCED_ERROR: Optional[str] = None
+
+# Agent class placeholder - will be set based on config
+AgentClass: Optional[Any] = None
+agent_mode: str = "unknown"
+
+# ============================================================================
+# AGENT IMPORT LOGIC with Graceful Fallback
+# ============================================================================
+
+if USE_INTELLIGENT_AGENT:
     try:
-        # Try to import memory systems (may fail on Python 3.14)
-        from src.memory import ChromaMemoryStore, EmbeddingProvider
-        from src.git_cache import GitRepoCache
-        from src.agents.enhanced_agent import EnhancedDeveloperAgent
-        print("🧠 Enhanced Agent loaded - full memory system enabled")
-    except Exception as e:
-        ENHANCED_ERROR = str(e)[:100]
-        USE_ENHANCED = False
-        print(f"⚠️  Enhanced Agent unavailable: {ENHANCED_ERROR}")
-        print("   Using Basic Agent (limited memory)")
-else:
-    print("ℹ️  Enhanced Agent disabled. Set USE_ENHANCED_AGENT=true to enable.")
+        # Try to import IntelligentAgent (new Tool-Use + Memory Agent)
+        from src.agents.intelligent_agent import IntelligentAgent
+        AgentClass = IntelligentAgent
+        agent_mode = "INTELLIGENT"
+        print("🧠 IntelligentAgent loaded - Tool-Use + 4-Layer Memory enabled")
+    except ImportError as e:
+        INTELLIGENT_ERROR = str(e)[:100]
+        print(f"⚠️  IntelligentAgent not available: {INTELLIGENT_ERROR}")
+        print("   Falling back to legacy agents...")
+        USE_INTELLIGENT_AGENT = False
 
-# Import basic agent last to avoid circular imports
-from src.agents import DeveloperAgent
+# Fallback chain if IntelligentAgent not available
+if not USE_INTELLIGENT_AGENT:
+    # Try Enhanced Developer Agent (Tool-Use without full memory)
+    USE_ENHANCED = os.getenv("USE_ENHANCED_AGENT", "false").lower() == "true"
+    
+    if USE_ENHANCED:
+        try:
+            from src.agents.enhanced_developer_agent import ToolUseDeveloperAgent
+            AgentClass = ToolUseDeveloperAgent
+            agent_mode = "TOOL-USE"
+            print("🔧 ToolUseDeveloperAgent loaded - Tool-Use Framework enabled")
+        except ImportError as e:
+            ENHANCED_ERROR = str(e)[:100]
+            print(f"⚠️  ToolUseDeveloperAgent unavailable: {ENHANCED_ERROR}")
+            USE_ENHANCED = False
+    
+    # Final fallback: Basic DeveloperAgent
+    if not USE_ENHANCED:
+        from src.agents import DeveloperAgent
+        AgentClass = DeveloperAgent
+        agent_mode = "LEGACY"
+        print("📦 DeveloperAgent loaded - Basic mode (limited features)")
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./kanban.db")
@@ -70,7 +102,7 @@ Base.metadata.create_all(bind=engine)
 
 
 class AgentWorker:
-    """Worker that continuously processes tickets."""
+    """Worker that continuously processes tickets with configurable agent."""
     
     def __init__(self):
         self.db = SessionLocal()
@@ -93,45 +125,48 @@ class AgentWorker:
         
         self.llm_client = KimiClient()
         
-        # Initialize agent
-        if USE_ENHANCED:
-            self.agent = self._create_enhanced_agent()
-        else:
-            self.agent = self._create_basic_agent()
-        
+        # Initialize agent based on selected mode
+        self.agent = self._create_agent()
         self.running = False
     
-    def _create_enhanced_agent(self):
-        """Create agent with full memory system."""
-        # Import here to avoid issues at module level
-        from src.memory import ChromaMemoryStore, EmbeddingProvider
-        from src.git_cache import GitRepoCache
-        from src.agents.enhanced_agent import EnhancedDeveloperAgent
+    def _create_agent(self):
+        """Create the appropriate agent based on mode."""
+        if agent_mode == "INTELLIGENT":
+            return self._create_intelligent_agent()
+        elif agent_mode == "TOOL-USE":
+            return self._create_tool_use_agent()
+        else:
+            return self._create_legacy_agent()
+    
+    def _create_intelligent_agent(self):
+        """Create the new IntelligentAgent with full capabilities."""
+        from src.agents.intelligent_agent import IntelligentAgent
         
-        # Redis URL for Git Cache
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        
-        # ChromaDB persistence
-        chroma_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
-        
-        # Create memory components
-        embedding_provider = EmbeddingProvider()
-        memory_store = ChromaMemoryStore(persist_dir=chroma_dir)
-        git_cache = GitRepoCache(self.git_provider, redis_url=redis_url)
-        
-        return EnhancedDeveloperAgent(
+        # IntelligentAgent has integrated memory and tool management
+        return IntelligentAgent(
             agent_id="mohami",
             git_provider=self.git_provider,
             llm_client=self.llm_client,
             ticket_crud=self.ticket_crud,
             comment_crud=self.comment_crud,
-            embedding_provider=embedding_provider,
-            memory_store=memory_store,
-            git_cache=git_cache,
         )
     
-    def _create_basic_agent(self):
-        """Create basic agent without memory systems."""
+    def _create_tool_use_agent(self):
+        """Create ToolUseDeveloperAgent (fallback level 1)."""
+        from src.agents.enhanced_developer_agent import ToolUseDeveloperAgent
+        
+        return ToolUseDeveloperAgent(
+            agent_id="mohami",
+            git_provider=self.git_provider,
+            llm_client=self.llm_client,
+            ticket_crud=self.ticket_crud,
+            comment_crud=self.comment_crud,
+        )
+    
+    def _create_legacy_agent(self):
+        """Create basic DeveloperAgent (fallback level 2)."""
+        from src.agents import DeveloperAgent
+        
         return DeveloperAgent(
             agent_id="mohami",
             git_provider=self.git_provider,
@@ -145,23 +180,38 @@ class AgentWorker:
         self.running = True
         
         print("=" * 60)
-        print("🤖 KI-Mitarbeiter Agent Worker")
+        print("🤖 Mohami Agent Worker")
         print("=" * 60)
         print(f"\n⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("📡 Polling for tickets every 5 seconds...")
-        print("🧠 Memory Systems:")
-        if USE_ENHANCED:
-            print("   ✓ Customer Context Memories")
-            print("   ✓ Git Repository Cache (Redis)")
-            print("   ✓ Episodic Memory (ChromaDB)")
-            print("   ✓ Soul & Rules (Markdown)")
+        
+        # Show which mode is active
+        print("\n🎛️  Agent Mode:")
+        if agent_mode == "INTELLIGENT":
+            print("   🧠 INTELLIGENT (Tool-Use + 4-Layer Memory)")
+            print("   ✓ Tool Registry with 8+ Tools")
+            print("   ✓ Short, Session, Long & Episodic Memory")
+            print("   ✓ Workspace Management (DDEV)")
+        elif agent_mode == "TOOL-USE":
+            print("   🔧 TOOL-USE (Tool Framework)")
+            print("   ✓ Dynamic Tool Selection")
+            print("   ✓ Tool Execution Loop")
+            print("   ⚠ Limited Memory Features")
         else:
-            print("   ⚠ Basic mode (limited memory)")
-            if ENHANCED_ERROR:
-                print(f"   ⚠ Reason: {ENHANCED_ERROR}")
-            else:
-                print("   ℹ Set USE_ENHANCED_AGENT=true to enable")
-        print("🛑 Press Ctrl+C to stop\n")
+            print("   📦 LEGACY (Basic)")
+            print("   ✓ Core ORPA Workflow")
+            print("   ⚠ No Tool-Use")
+            print("   ⚠ No Advanced Memory")
+        
+        # Show fallback info if applicable
+        if INTELLIGENT_ERROR:
+            print(f"\n⚠️  Fallback reason: IntelligentAgent import failed")
+            print(f"   Error: {INTELLIGENT_ERROR}")
+        if ENHANCED_ERROR:
+            print(f"\n⚠️  Fallback reason: EnhancedAgent import failed")
+            print(f"   Error: {ENHANCED_ERROR}")
+        
+        print("\n🛑 Press Ctrl+C to stop\n")
         
         try:
             while self.running:
@@ -185,6 +235,7 @@ class AgentWorker:
                 print(f"\n📨 New ticket: {ticket.id[:8]} - {ticket.title}")
                 print(f"   Customer: {ticket.customer}")
                 print(f"   Repository: {ticket.repository}")
+                print(f"   Agent: {agent_mode} mode")
                 print("   → Starting ORPA workflow...")
                 
                 await self.agent.process_ticket(ticket.id)
@@ -216,7 +267,6 @@ class AgentWorker:
                             print("   ✅ Complete")
             
             # 3. Check for in_progress tickets with new user feedback
-            # (e.g., user reports PR was empty or wrong)
             in_progress_tickets = await self.ticket_crud.list(
                 status="in_progress"
             )
@@ -248,6 +298,7 @@ class AgentWorker:
     async def process_single_ticket(self, ticket_id: str):
         """Process a single ticket immediately."""
         print(f"\n🎯 Processing single ticket: {ticket_id}")
+        print(f"   Agent mode: {agent_mode}")
         await self.agent.process_ticket(ticket_id)
         print("✅ Complete")
 
