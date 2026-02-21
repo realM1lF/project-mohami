@@ -2,8 +2,10 @@
 FastAPI application for Kanban Board Backend
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional, List
 
+import yaml
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
@@ -251,6 +253,85 @@ def webhook_ticket_created(data: WebhookTicketCreated, db: Session = Depends(get
         "ticket_id": data.id,
         "action": "ticket_created_notification"
     }
+
+
+# ============================================================================
+# Config endpoints (customers, agents)
+# ============================================================================
+
+CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
+AGENTS_DIR = Path(__file__).parent.parent.parent / "agents"
+
+
+def _load_customers_yaml() -> dict:
+    """Load and parse customers.yaml with legacy compatibility."""
+    yaml_path = CONFIG_DIR / "customers.yaml"
+    if not yaml_path.exists():
+        return {}
+    with open(yaml_path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("customers", {})
+
+
+def _normalize_customer(cid: str, raw: dict) -> dict:
+    """Normalize a customer entry to a stable API response format."""
+    repos = []
+    if "repositories" in raw:
+        for r in raw["repositories"]:
+            repos.append({
+                "repo": r.get("repo", ""),
+                "default_branch": r.get("default_branch", "main"),
+            })
+    elif "repo_url" in raw:
+        url = raw["repo_url"]
+        repo_slug = "/".join(url.rstrip("/").split("/")[-2:]) if "/" in url else url
+        repos.append({
+            "repo": repo_slug,
+            "default_branch": raw.get("default_branch", "main"),
+        })
+    return {
+        "id": cid,
+        "name": raw.get("name", cid),
+        "repositories": repos,
+    }
+
+
+@app.get("/config/customers", tags=["Config"])
+def get_customers():
+    """List all configured customers with their repositories."""
+    raw_customers = _load_customers_yaml()
+    return [
+        _normalize_customer(cid, data)
+        for cid, data in raw_customers.items()
+    ]
+
+
+@app.get("/config/agents", tags=["Config"])
+def get_agents():
+    """List all available KI agents."""
+    agents = []
+    if AGENTS_DIR.exists():
+        for agent_dir in sorted(AGENTS_DIR.iterdir()):
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                continue
+            soul_path = agent_dir / "soul.md"
+            if not soul_path.exists():
+                continue
+            description = ""
+            first_lines = soul_path.read_text(encoding="utf-8").strip().split("\n")
+            for line in first_lines:
+                stripped = line.strip().lstrip("#").strip()
+                if stripped:
+                    description = stripped
+                    break
+            agents.append({
+                "id": agent_dir.name,
+                "name": agent_dir.name.capitalize(),
+                "description": description,
+            })
+    if not agents:
+        agents.append({"id": "mohami", "name": "Mohami", "description": "KI-Entwickler"})
+    return agents
 
 
 # Run with: uvicorn src.kanban.main:app --reload

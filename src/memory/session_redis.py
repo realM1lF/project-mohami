@@ -32,7 +32,7 @@ class RedisMemory:
     Unterstützt TTL für automatische Cleanup.
     
     Usage:
-        redis_client = redis.Redis(host='localhost', port=6379)
+        redis_client = redis.Redis(host='redis', port=6379)
         memory = RedisMemory(customer_id="alp-shopware", redis_client=redis_client)
         
         # Chat

@@ -1,11 +1,7 @@
 """AI Agents for automated software development."""
 
-# Legacy agents (old implementations)
-from .developer_agent import DeveloperAgent, AgentContext
-from .enhanced_developer_agent import ToolUseDeveloperAgent
-
-# New Intelligent Agent with ORPA + Tool-Use
-from .agent_types import (
+# New Intelligent Agent with ORPA + Tool-Use (imported first, no legacy deps)
+from src.agents.agent_types import (
     AgentConfig,
     AgentContext as IntelligentAgentContext,
     AgentResult,
@@ -16,14 +12,10 @@ from .agent_types import (
     ToolExecutionStep,
     ToolExecutionResult,
 )
-from .orpa_states import ORPAStateMachine, ORPAWorkflow
-from .intelligent_agent import IntelligentAgent
+from src.agents.orpa_states import ORPAStateMachine, ORPAWorkflow
+from src.agents.intelligent_agent import IntelligentAgent
 
 __all__ = [
-    # Legacy
-    "DeveloperAgent",
-    "AgentContext",
-    "ToolUseDeveloperAgent",
     # New Intelligent Agent
     "IntelligentAgent",
     "IntelligentAgentContext",
@@ -38,3 +30,11 @@ __all__ = [
     "ToolExecutionStep",
     "ToolExecutionResult",
 ]
+
+# Legacy agents (optional, only if dependencies available)
+try:
+    from src.agents.developer_agent import DeveloperAgent, AgentContext
+    from src.agents.enhanced_developer_agent import ToolUseDeveloperAgent
+    __all__.extend(["DeveloperAgent", "AgentContext", "ToolUseDeveloperAgent"])
+except ImportError:
+    pass  # Legacy agents require additional dependencies

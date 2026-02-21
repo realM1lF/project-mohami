@@ -23,7 +23,7 @@ import {
   CardContent,
 } from '@mui/material';
 import TicketCard from './TicketCard';
-import { statusColors } from '../theme';
+import { statusColors, priorityColors } from '../theme';
 
 const COLUMNS = [
   { id: 'backlog', title: 'Backlog', icon: 'inbox' },
@@ -141,7 +141,7 @@ function DroppableColumn({ column, tickets, onTicketClick, isOver }) {
 
 // Drag Overlay Card (shown while dragging)
 function DragOverlayCard({ ticket }) {
-  const priorityColor = statusColors[ticket.priority] || statusColors.medium;
+  const priorityColor = priorityColors[ticket.priority] || priorityColors.medium;
   const statusColor = statusColors[ticket.status] || statusColors.backlog;
 
   return (

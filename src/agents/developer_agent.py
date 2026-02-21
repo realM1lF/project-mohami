@@ -56,7 +56,7 @@ class DeveloperAgent:
         self.state = AgentState.IDLE
         self.current_context: Optional[AgentContext] = None
     
-    async def process_ticket(self, ticket_id: str) -> None:
+    async def process_ticket(self, ticket_id: str, ticket_data: Optional[Dict] = None) -> None:
         """Process a ticket through ORPA workflow."""
         try:
             self.state = AgentState.OBSERVING

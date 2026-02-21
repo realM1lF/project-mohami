@@ -12,47 +12,30 @@
 version: "2.0"
 
 # Template für neue Kunden (kopieren und anpassen)
-template:
-  id: "customer-id"
-  name: "Customer Name"
-  git_provider: "github"  # oder: bitbucket, gitlab
-  repo_url: "https://github.com/owner/repository"
-  has_ddev: false  # true wenn Repo DDEV-Konfiguration enthält
-  default_branch: "main"
-  workspace_path: "~/ki-data/workspaces/customer-id"
-  auth_token: null  # Optional: GitHub/Bitbucket Token für private Repos
-  
-  tech_stack:
-    type: "python"  # python, php, shopware, node, etc.
-    version: "3.11"
-    framework: null  # Optional: django, flask, laravel, etc.
-  
-  # Optional: Test-Konfiguration
-  test_config:
-    command: "python -m pytest"  # oder: vendor/bin/phpunit, npm test
-    directory: "."
+# 
+# Neues Format: `repositories` Liste (empfohlen)
+# Legacy-Format: `repo_url` String (wird automatisch konvertiert)
+#
+# template:
+#   id: "customer-id"
+#   name: "Customer Name"
+#   repositories:
+#     - repo: "owner/repo-name"          # GitHub-Format: owner/repo
+#       default_branch: "main"
+#       tech_stack: { type: "python", version: "3.11" }
+#     - repo: "owner/another-repo"
+#       default_branch: "develop"
+#       tech_stack: { type: "php", version: "8.2", framework: "shopware" }
 
 # Aktive Kundenkonfigurationen
 customers:
-  # Test-Customer für Development
   test-customer:
     id: test-customer
     name: "Test Customer"
-    git_provider: github
-    repo_url: https://github.com/realM1lF/personal-ki-agents
-    has_ddev: false  # aktuell kein DDEV im Test-Repo
-    default_branch: main
-    workspace_path: ~/ki-data/workspaces/test-customer
-    auth_token: null  # Setze GITHUB_TOKEN für private Repos
-    
-    tech_stack:
-      type: python
-      version: "3.11"
-      framework: null
-    
-    test_config:
-      command: "python -m pytest"
-      directory: "."
+    repositories:
+      - repo: "realM1lF/personal-ki-agents"
+        default_branch: "main"
+        tech_stack: { type: "python", version: "3.11" }
 
   # Beispiel: Python Projekt mit DDEV
   # python-project:

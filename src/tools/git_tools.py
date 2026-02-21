@@ -905,8 +905,14 @@ class GitHubCreateBranchTool(BaseTool):
         except Exception as e:
             error_msg = str(e).lower()
             if "already exists" in error_msg or "reference already exists" in error_msg:
-                return ToolResult.error_result(
-                    error=f"Branch '{branch_name}' already exists",
+                return ToolResult.success_result(
+                    data={
+                        "branch_name": branch_name,
+                        "from_branch": from_branch,
+                        "url": f"https://github.com/{repo}/tree/{branch_name}",
+                        "repo": repo,
+                        "already_existed": True,
+                    },
                     tool_name=self.name
                 )
             return ToolResult.error_result(
@@ -966,6 +972,107 @@ class GitHubGetRepoInfoTool(BaseTool):
         except Exception as e:
             return ToolResult.error_result(
                 error=f"Failed to get repository info: {str(e)}",
+                tool_name=self.name
+            )
+
+
+class GitHubCreatePRTool(BaseTool):
+    """Tool to create a Pull Request on GitHub."""
+    
+    name = "github_create_pr"
+    description = "Erstellt einen Pull Request auf GitHub"
+    parameters = [
+        ToolParameter(
+            name="repo",
+            description="Repository name in format 'owner/repo'",
+            type=ToolParameterType.STRING,
+            required=True
+        ),
+        ToolParameter(
+            name="title",
+            description="Title of the Pull Request",
+            type=ToolParameterType.STRING,
+            required=True
+        ),
+        ToolParameter(
+            name="body",
+            description="Description / body of the Pull Request",
+            type=ToolParameterType.STRING,
+            required=True
+        ),
+        ToolParameter(
+            name="head_branch",
+            description="Branch with changes (source)",
+            type=ToolParameterType.STRING,
+            required=True
+        ),
+        ToolParameter(
+            name="base_branch",
+            description="Target branch (default: main)",
+            type=ToolParameterType.STRING,
+            required=False,
+            default="main"
+        )
+    ]
+    
+    def __init__(self, git_provider=None):
+        super().__init__()
+        self.git = git_provider
+    
+    async def run(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        head_branch: str,
+        base_branch: str = "main"
+    ) -> ToolResult:
+        """Create a Pull Request."""
+        if not self.git:
+            return ToolResult.error_result(
+                error="Git provider not initialized",
+                tool_name=self.name
+            )
+        
+        try:
+            pr_info = await self.git.create_pr(
+                repo=repo,
+                title=title,
+                body=body,
+                head_branch=head_branch,
+                base_branch=base_branch
+            )
+            
+            return ToolResult.success_result(
+                data={
+                    "pr_number": pr_info.number,
+                    "url": pr_info.url,
+                    "title": pr_info.title,
+                    "state": pr_info.state,
+                    "head_branch": head_branch,
+                    "base_branch": base_branch,
+                    "repo": repo
+                },
+                tool_name=self.name
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "a pull request already exists" in error_msg:
+                return ToolResult.success_result(
+                    data={
+                        "pr_number": None,
+                        "url": f"https://github.com/{repo}/pulls",
+                        "title": title,
+                        "state": "already_existed",
+                        "head_branch": head_branch,
+                        "base_branch": base_branch,
+                        "repo": repo,
+                        "already_existed": True,
+                    },
+                    tool_name=self.name
+                )
+            return ToolResult.error_result(
+                error=f"Failed to create PR: {str(e)}",
                 tool_name=self.name
             )
 

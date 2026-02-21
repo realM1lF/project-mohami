@@ -20,8 +20,11 @@ services:
     volumes:
       - ~/ki-data/kanban.db:/app/kanban.db  # Außerhalb des Repos!
       - ./.env:/app/.env:ro
+      - ./agent_worker.py:/app/agent_worker.py:ro
+      - ./src:/app/src
       - ~/ki-data/chroma:/app/data/chroma  # Außerhalb des Repos!
       - ./agents:/app/agents:ro
+      - ./config:/app/config:ro
     environment:
       - DATABASE_URL=sqlite:///./kanban.db
       - REDIS_URL=redis://redis:6379
@@ -56,7 +59,10 @@ services:
     volumes:
       - ~/ki-data/kanban.db:/app/kanban.db  # Außerhalb des Repos!
       - ./.env:/app/.env:ro
+      - ./agent_worker.py:/app/agent_worker.py:ro
+      - ./src:/app/src
       - ~/ki-data/chroma:/app/data/chroma  # Außerhalb des Repos!
+      - ~/ki-data/chroma-cache:/root/.cache/chroma  # ONNX Embedding-Modell Cache
       - ./agents:/app/agents:ro
     environment:
       - DATABASE_URL=sqlite:///./kanban.db
@@ -64,6 +70,8 @@ services:
       - CHROMA_PERSIST_DIR=/app/data/chroma
       - USE_ENHANCED_AGENT=true
       - USE_INTELLIGENT_AGENT=${USE_INTELLIGENT_AGENT:-true}
+      - OPEN_ROUTER_API_KEY=${OPEN_ROUTER_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
     depends_on:
       - backend
       - redis
@@ -87,3 +95,4 @@ services:
 networks:
   ki-network:
     driver: bridge
+

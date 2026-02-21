@@ -2,9 +2,12 @@
 
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Dict, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +36,8 @@ class AgentConfig:
     personality: AgentPersonality
     rules: AgentRules
     system_prompt: str
+    knowledge: str = ""
+    memories: str = ""
 
 
 class AgentConfigLoader:
@@ -40,8 +45,11 @@ class AgentConfigLoader:
     
     Structure:
         agents/{agent_id}/
-            soul.md       - Personality definition
-            rules.md      - Hard constraints and rules
+            soul.md              - Personality definition
+            rules.md             - Hard constraints and rules
+            knowledge.md         - Domain knowledge and project info
+            memories/            - Curated learnings, systems docs, links
+            customers/{id}/      - Per-customer context and tech-stack
     """
     
     def __init__(self, base_path: str = "./agents"):
@@ -62,17 +70,27 @@ class AgentConfigLoader:
             # Return default config if no custom config exists
             return self._default_config(agent_id)
         
-        # Load soul and rules
         personality = self._load_soul(agent_path / "soul.md", agent_id)
         rules = self._load_rules(agent_path / "rules.md")
+        knowledge = self._load_markdown_file(agent_path / "knowledge.md")
+        memories = self._load_directory(agent_path / "memories")
         
-        # Generate system prompt
         system_prompt = self._build_system_prompt(personality, rules)
+        
+        logger.info(
+            f"Loaded config for '{agent_id}': "
+            f"soul={'yes' if personality.description else 'default'}, "
+            f"rules={len(rules.hard_constraints)} constraints, "
+            f"knowledge={len(knowledge)} chars, "
+            f"memories={len(memories)} chars"
+        )
         
         return AgentConfig(
             personality=personality,
             rules=rules,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            knowledge=knowledge,
+            memories=memories,
         )
     
     def _load_soul(self, soul_path: Path, agent_id: str) -> AgentPersonality:
@@ -167,6 +185,47 @@ class AgentConfigLoader:
         items = re.findall(r"^[\s]*[-•][\s]+(.+)$", section, re.MULTILINE)
         return [item.strip() for item in items if item.strip()]
     
+    def load_customer_context(self, agent_id: str, customer_id: str) -> str:
+        """Load per-customer context files (context.md, tech-stack.md, etc.).
+        
+        Args:
+            agent_id: Agent identifier (e.g., "mohami")
+            customer_id: Customer identifier (e.g., "test-customer")
+            
+        Returns:
+            Combined content of all .md files in the customer directory,
+            or empty string if directory doesn't exist.
+        """
+        customer_path = self.base_path / agent_id / "customers" / customer_id
+        return self._load_directory(customer_path)
+    
+    def _load_markdown_file(self, path: Path) -> str:
+        """Read a single markdown file, returning empty string if missing."""
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.warning(f"Could not read {path}: {e}")
+            return ""
+    
+    def _load_directory(self, dir_path: Path) -> str:
+        """Recursively read all .md files in a directory, concatenated with headers."""
+        if not dir_path.exists() or not dir_path.is_dir():
+            return ""
+        
+        parts = []
+        for md_file in sorted(dir_path.rglob("*.md")):
+            try:
+                content = md_file.read_text(encoding="utf-8").strip()
+                if content:
+                    rel_path = md_file.relative_to(dir_path)
+                    parts.append(f"[{rel_path}]\n{content}")
+            except Exception as e:
+                logger.warning(f"Could not read {md_file}: {e}")
+        
+        return "\n\n---\n\n".join(parts)
+    
     def _default_config(self, agent_id: str) -> AgentConfig:
         """Return default configuration."""
         personality = self._default_personality(agent_id)
@@ -176,7 +235,9 @@ class AgentConfigLoader:
         return AgentConfig(
             personality=personality,
             rules=rules,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            knowledge="",
+            memories="",
         )
     
     def _default_personality(self, agent_id: str) -> AgentPersonality:

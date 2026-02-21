@@ -11,8 +11,24 @@ Lebensdauer: Permanent
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import hashlib
+import json
 
 from .chroma_store import ChromaMemoryStore
+
+
+def _sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure all metadata values are ChromaDB-compatible primitives (str, int, float, bool)."""
+    sanitized = {}
+    for key, value in metadata.items():
+        if isinstance(value, (str, int, float, bool)):
+            sanitized[key] = value
+        elif value is None:
+            sanitized[key] = ""
+        elif isinstance(value, (list, dict)):
+            sanitized[key] = json.dumps(value, default=str)
+        else:
+            sanitized[key] = str(value)
+    return sanitized
 
 
 class ChromaLongTermMemory:
@@ -76,12 +92,12 @@ class ChromaLongTermMemory:
         """
         pattern_id = self._generate_id(pattern, "pattern")
         
-        doc_metadata = {
+        doc_metadata = _sanitize_metadata({
             "type": "code_pattern",
             "customer": self.customer_id,
             "created_at": datetime.utcnow().isoformat(),
             **(metadata or {})
-        }
+        })
         
         # Wenn kein embedding, wird es von Chroma berechnet
         self.chroma._get_collection(self._patterns_collection).add(
@@ -158,14 +174,14 @@ class ChromaLongTermMemory:
         content = f"## Problem\n{problem}\n\n## Solution\n{solution}"
         solution_id = self._generate_id(content, f"solution:{ticket_id}")
         
-        doc_metadata = {
+        doc_metadata = _sanitize_metadata({
             "type": "solution",
             "customer": self.customer_id,
             "ticket_id": ticket_id,
             "problem_summary": problem[:200],
             "created_at": datetime.utcnow().isoformat(),
             **(metadata or {})
-        }
+        })
         
         self.chroma._get_collection(self._solutions_collection).add(
             ids=[solution_id],
@@ -233,12 +249,12 @@ class ChromaLongTermMemory:
         collection_name = f"{self.customer_id}_{memory_type}"
         memory_id = self._generate_id(content, memory_type)
         
-        doc_metadata = {
+        doc_metadata = _sanitize_metadata({
             "type": memory_type,
             "customer": self.customer_id,
             "created_at": datetime.utcnow().isoformat(),
             **(metadata or {})
-        }
+        })
         
         self.chroma._get_collection(collection_name).add(
             ids=[memory_id],

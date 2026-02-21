@@ -59,7 +59,7 @@ class MemoryConfig:
     
     # Session (Redis)
     session_ttl: int = 86400  # 24 Stunden
-    redis_host: str = "localhost"
+    redis_host: str = "redis"
     redis_port: int = 6379
     redis_db: int = 0
     

@@ -40,8 +40,12 @@ try:
     from ..tools.executor import ToolExecutor
     from ..tools.base import ToolResult
     from ..tools.file_tools import FileReadTool, FileWriteTool, FileListTool, FileSearchTool
-    from ..tools.code_tools import CodeAnalyzeTool, CodeRefactorTool
-    from ..tools.git_tools import GitStatusTool, GitCommitTool, GitPushTool
+    from ..tools.code_tools import CodeAnalyzeTool, CodeRefactorTool, CodeGenerateTool
+    from ..tools.git_tools import (
+        GitStatusTool, GitCommitTool,
+        GitHubReadFileTool, GitHubWriteFileTool, GitHubListFilesTool,
+        GitHubCreateBranchTool, GitHubGetRepoInfoTool, GitHubCreatePRTool,
+    )
     TOOLS_AVAILABLE = True
 except ImportError:
     TOOLS_AVAILABLE = False
@@ -58,6 +62,12 @@ try:
     WORKSPACE_AVAILABLE = True
 except ImportError:
     WORKSPACE_AVAILABLE = False
+
+try:
+    from ..agent_config import AgentConfigLoader
+    IDENTITY_AVAILABLE = True
+except ImportError:
+    IDENTITY_AVAILABLE = False
 
 try:
     from ..llm.kimi_client import KimiClient, Message, LLMResponse
@@ -90,18 +100,44 @@ class IntelligentAgent:
         state_machine: ORPA state machine
     """
     
-    def __init__(self, agent_id: str, config: AgentConfig):
+    def __init__(self, agent_id: str, config: AgentConfig, ticket_crud=None, comment_crud=None, git_provider=None):
         """Initialize the IntelligentAgent.
         
         Args:
             agent_id: Unique identifier for this agent
             config: Agent configuration
+            ticket_crud: Optional TicketCRUD for status updates
+            comment_crud: Optional CommentCRUD for posting comments
+            git_provider: Optional GitProvider for GitHub API operations
             
         Raises:
             RuntimeError: If required dependencies are not available
         """
         self.agent_id = agent_id
         self.config = config
+        self.ticket_crud = ticket_crud
+        self.comment_crud = comment_crud
+        self.git_provider = git_provider
+        
+        # === 0. IDENTITY laden (aus agents/{agent_id}/) ===
+        self.identity_prompt = None
+        self.knowledge = ""
+        self.memories = ""
+        self._config_loader = None
+        
+        if IDENTITY_AVAILABLE:
+            try:
+                loader = AgentConfigLoader("./agents")
+                identity = loader.load_config(agent_id)
+                self.identity_prompt = identity.system_prompt
+                self.knowledge = identity.knowledge
+                self.memories = identity.memories
+                self._config_loader = loader
+                print(f"   🧬 Identity loaded: soul + rules + knowledge ({len(self.knowledge)} chars) + memories ({len(self.memories)} chars)")
+            except Exception as e:
+                logger.warning(f"Could not load agent identity from agents/{agent_id}/: {e}")
+        else:
+            logger.warning("agent_config module not available, using default identity")
         
         # Check dependencies
         if not TOOLS_AVAILABLE:
@@ -109,12 +145,15 @@ class IntelligentAgent:
         if not LLM_AVAILABLE:
             raise RuntimeError("LLM module not available")
         
-        # === 1. TOOLS initialisieren ===
+        # === 1. LLM Client (before tools, since CodeGenerateTool needs it) ===
+        self.llm = KimiClient()
+        
+        # === 2. TOOLS initialisieren ===
         self.tools = ToolRegistry()
         self._register_all_tools()
         self.executor = ToolExecutor(self.tools, log_executions=True)
         
-        # === 2. MEMORY initialisieren ===
+        # === 3. MEMORY initialisieren ===
         if config.enable_memory and MEMORY_AVAILABLE:
             self.memory = UnifiedMemoryManager(
                 customer_id=config.customer_id,
@@ -125,7 +164,7 @@ class IntelligentAgent:
             if config.enable_memory:
                 logger.warning("Memory enabled but module not available")
         
-        # === 3. WORKSPACE initialisieren ===
+        # === 4. WORKSPACE initialisieren ===
         if config.enable_workspace and WORKSPACE_AVAILABLE:
             self.workspace = get_workspace_manager()
             self.repo_manager = get_repository_manager()
@@ -134,9 +173,6 @@ class IntelligentAgent:
             self.repo_manager = None
             if config.enable_workspace:
                 logger.warning("Workspace enabled but module not available")
-        
-        # === 4. LLM Client ===
-        self.llm = KimiClient()
         
         # === 5. ORPA State Machine ===
         self.state_machine = ORPAStateMachine(
@@ -151,28 +187,52 @@ class IntelligentAgent:
     
     def _register_all_tools(self):
         """Register all available tools with the registry."""
-        # File tools
+        # File tools (core -- must succeed)
         self.tools.register(FileReadTool(), category="file")
         self.tools.register(FileWriteTool(), category="file")
         self.tools.register(FileListTool(), category="file")
         self.tools.register(FileSearchTool(), category="file")
         
-        # Code tools (if available)
-        try:
-            self.tools.register(CodeAnalyzeTool(), category="code")
-            self.tools.register(CodeRefactorTool(), category="code")
-        except Exception:
-            pass
+        # Code tools (each registered individually so one failure doesn't block others)
+        for tool_factory, name in [
+            (lambda: CodeAnalyzeTool(), "CodeAnalyzeTool"),
+            (lambda: CodeRefactorTool(), "CodeRefactorTool"),
+            (lambda: CodeGenerateTool(llm_client=self.llm), "CodeGenerateTool"),
+        ]:
+            try:
+                self.tools.register(tool_factory(), category="code")
+            except Exception as e:
+                logger.warning(f"Failed to register {name}: {e}")
         
-        # Git tools (if available)
-        try:
-            self.tools.register(GitStatusTool(), category="git")
-            self.tools.register(GitCommitTool(), category="git")
-            self.tools.register(GitPushTool(), category="git")
-        except Exception:
-            pass
+        # Local git tools
+        for tool_factory, name in [
+            (lambda: GitStatusTool(), "GitStatusTool"),
+            (lambda: GitCommitTool(), "GitCommitTool"),
+        ]:
+            try:
+                self.tools.register(tool_factory(), category="git")
+            except Exception as e:
+                logger.warning(f"Failed to register {name}: {e}")
         
-        logger.debug(f"Registered {len(self.tools)} tools")
+        # GitHub API tools (remote operations via git_provider)
+        if self.git_provider:
+            gp = self.git_provider
+            for tool_factory, name in [
+                (lambda: GitHubReadFileTool(git_provider=gp), "GitHubReadFileTool"),
+                (lambda: GitHubWriteFileTool(git_provider=gp), "GitHubWriteFileTool"),
+                (lambda: GitHubListFilesTool(git_provider=gp), "GitHubListFilesTool"),
+                (lambda: GitHubCreateBranchTool(git_provider=gp), "GitHubCreateBranchTool"),
+                (lambda: GitHubGetRepoInfoTool(git_provider=gp), "GitHubGetRepoInfoTool"),
+                (lambda: GitHubCreatePRTool(git_provider=gp), "GitHubCreatePRTool"),
+            ]:
+                try:
+                    self.tools.register(tool_factory(), category="github")
+                except Exception as e:
+                    logger.warning(f"Failed to register {name}: {e}")
+        else:
+            logger.warning("No git_provider - GitHub API tools not available")
+        
+        logger.info(f"Registered {len(self.tools)} tools")
     
     def _on_state_transition(
         self, 
@@ -244,15 +304,22 @@ class IntelligentAgent:
             
             # Load memory context if available
             if self.memory:
-                memory_context = self.memory.build_agent_context(
-                    ticket_id=ticket_id,
-                    ticket_description=ticket.description
-                )
-                context.relevant_learnings = memory_context.get("relevant_learnings", [])
-                context.similar_tickets = memory_context.get("recent_learnings", [])
-                context.chat_history = memory_context.get("chat_history", [])
+                print("   📝 Loading memory context...")
+                try:
+                    memory_context = self.memory.build_agent_context(
+                        ticket_id=ticket_id,
+                        ticket_description=ticket.description
+                    )
+                    context.relevant_learnings = memory_context.get("relevant_learnings", [])
+                    context.similar_tickets = memory_context.get("recent_learnings", [])
+                    context.chat_history = memory_context.get("chat_history", [])
+                    print(f"   📝 Memory loaded: {len(context.relevant_learnings)} learnings, {len(context.similar_tickets)} similar")
+                except Exception as e:
+                    print(f"   ⚠️  Memory load failed (continuing): {e}")
             
             # Start ORPA workflow
+            print("   🔄 Starting ORPA state machine...")
+            self.state_machine.reset()
             self.state_machine.start(context)
             
             # Run workflow loop
@@ -272,13 +339,24 @@ class IntelligentAgent:
                     await self._act(context)
                     
                 elif state == ORPAState.NEEDS_CLARIFICATION:
-                    # Halt and wait for clarification
                     return self._create_result(context, success=False)
                     
                 elif state == ORPAState.ERROR:
+                    await self._post_comment(
+                        context.ticket.ticket_id,
+                        f"❌ Fehler bei der Verarbeitung. Ich schaue mir das nochmal an."
+                    )
                     return self._create_result(context, success=False)
             
-            # Workflow completed
+            # Workflow completed successfully
+            files = [r.data.get("path", "") for r in context.execution_results if r.success and r.data and isinstance(r.data, dict)]
+            files_text = "\n".join(f"- `{f}`" for f in files if f) if files else "- (keine Dateien geändert)"
+            await self._post_comment(
+                context.ticket.ticket_id,
+                f"✅ **Fertig!**\n\n"
+                f"**Verständnis:** {context.understanding[:200]}\n\n"
+                f"**Geänderte Dateien:**\n{files_text}"
+            )
             return self._create_result(context, success=True)
             
         except Exception as e:
@@ -304,6 +382,7 @@ class IntelligentAgent:
         - Git status
         - Similar past solutions from memory
         """
+        print("   👁️  ORPA Phase: OBSERVING")
         logger.debug("ORPA Phase: OBSERVING")
         context.iteration += 1
         
@@ -317,7 +396,7 @@ class IntelligentAgent:
             
             # 2. Get repository structure
             if self.workspace and context.ticket.customer_id:
-                workspace_path = self.workspace.get_workspace_path(context.ticket.customer_id)
+                workspace_path = self.repo_manager.get_workspace_path(context.ticket.customer_id)
                 if workspace_path and Path(workspace_path).exists():
                     # List top-level structure
                     result = await self.executor.execute(
@@ -335,7 +414,7 @@ class IntelligentAgent:
                 keywords = self._extract_keywords(context.ticket.description)
                 for keyword in keywords[:3]:  # Limit to top 3 keywords
                     if self.workspace and context.ticket.customer_id:
-                        workspace_path = self.workspace.get_workspace_path(context.ticket.customer_id)
+                        workspace_path = self.repo_manager.get_workspace_path(context.ticket.customer_id)
                         if workspace_path:
                             result = await self.executor.execute(
                                 "file_search",
@@ -354,15 +433,21 @@ class IntelligentAgent:
             
             # 4. Get similar solutions from memory
             if self.memory and context.ticket.description:
+                print("      Memory: searching similar solutions...")
                 similar = self.memory.find_solutions(context.ticket.description, limit=3)
                 if similar:
                     context.relevant_learnings = similar
                     context.add_observation("similar_solutions", similar)
+                    print(f"      Memory: found {len(similar)} similar solutions")
+                else:
+                    print("      Memory: no similar solutions found")
             
             # Transition to REASONING
+            print("   👁️  OBSERVE complete")
             self.state_machine.transition_to(ORPAState.REASONING, "Observation complete")
             
         except Exception as e:
+            print(f"   ❌ Observation failed: {e}")
             logger.exception("Observation failed")
             self.state_machine.complete(success=False, reason=f"Observation error: {e}")
     
@@ -374,6 +459,7 @@ class IntelligentAgent:
         - Which tools are needed
         - The approach to take
         """
+        print("   🧠 ORPA Phase: REASONING")
         logger.debug("ORPA Phase: REASONING")
         
         try:
@@ -384,16 +470,21 @@ class IntelligentAgent:
             prompt = self._build_reasoning_prompt(context, tools_schemas)
             
             # Call LLM
+            system_prompt = self._get_system_prompt(context)
+            print(f"      System prompt: {len(system_prompt)} chars")
+            print(f"      User prompt: {len(prompt)} chars")
             messages = [
-                Message(role="system", content=self._get_system_prompt()),
+                Message(role="system", content=system_prompt),
                 Message(role="user", content=prompt)
             ]
             
+            print("      Calling LLM (Kimi 2.5)...")
             response = await self.llm.chat(
                 messages=messages,
                 temperature=self.config.llm_temperature,
                 max_tokens=self.config.llm_max_tokens
             )
+            print(f"      LLM response: {len(response.content)} chars, tokens: {response.usage}")
             
             # Parse reasoning result
             try:
@@ -425,13 +516,20 @@ class IntelligentAgent:
             
             # Check if clarification needed
             if reasoning.needs_clarification:
-                self.state_machine.needs_clarification(reasoning.clarification_question or "Clarification needed")
+                question = reasoning.clarification_question or "Ich habe eine Rückfrage zu diesem Ticket."
+                await self._post_comment(
+                    context.ticket.ticket_id,
+                    f"❓ {question}\n\nBitte antworte hier, dann mache ich weiter."
+                )
+                self.state_machine.needs_clarification(question)
                 return
             
             # Transition to PLANNING
+            print(f"   🧠 REASON complete: {context.understanding[:100]}")
             self.state_machine.transition_to(ORPAState.PLANNING, "Reasoning complete")
             
         except Exception as e:
+            print(f"   ❌ Reasoning failed: {e}")
             logger.exception("Reasoning failed")
             self.state_machine.complete(success=False, reason=f"Reasoning error: {e}")
     
@@ -441,6 +539,7 @@ class IntelligentAgent:
         Creates a detailed plan of which tools to execute
         and in what order.
         """
+        print("   📋 ORPA Phase: PLANNING")
         logger.debug("ORPA Phase: PLANNING")
         
         try:
@@ -448,49 +547,22 @@ class IntelligentAgent:
             prompt = self._build_planning_prompt(context)
             
             # Call LLM
+            system_prompt = self._get_system_prompt(context)
             messages = [
-                Message(role="system", content=self._get_system_prompt()),
+                Message(role="system", content=system_prompt),
                 Message(role="user", content=prompt)
             ]
             
+            print(f"      Calling LLM for plan ({len(prompt)} chars prompt)...")
             response = await self.llm.chat(
                 messages=messages,
                 temperature=self.config.llm_temperature,
                 max_tokens=self.config.llm_max_tokens
             )
+            print(f"      LLM plan response: {len(response.content)} chars")
             
             # Parse execution plan
-            try:
-                content = response.content
-                # Extract JSON
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
-                
-                plan_data = json.loads(content.strip())
-                steps_data = plan_data.get("steps", [])
-                
-                steps = []
-                for i, step_data in enumerate(steps_data, 1):
-                    steps.append(ToolExecutionStep(
-                        step_number=i,
-                        tool_name=step_data.get("tool"),
-                        parameters=step_data.get("parameters", {}),
-                        description=step_data.get("description", ""),
-                        depends_on=step_data.get("depends_on"),
-                        condition=step_data.get("condition"),
-                    ))
-                
-                plan = ToolExecutionPlan(
-                    steps=steps,
-                    estimated_steps=len(steps)
-                )
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.warning(f"Failed to parse plan, creating fallback: {e}")
-                # Create fallback plan based on understanding
-                plan = self._create_fallback_plan(context)
+            plan = self._parse_plan_response(response.content, context)
             
             # Update context
             context.execution_plan = plan
@@ -508,10 +580,12 @@ class IntelligentAgent:
         Executes tools in sequence, handling errors and
         adapting the plan as needed.
         """
-        logger.debug("ORPA Phase: ACTING")
+        logger.warning("ORPA Phase: ACTING - %d steps planned", 
+                       len(context.execution_plan.steps) if context.execution_plan else 0)
         
-        if not context.execution_plan:
-            self.state_machine.complete(success=False, reason="No execution plan")
+        if not context.execution_plan or not context.execution_plan.steps:
+            print("   ⚠️  No execution plan or 0 steps - failing")
+            self.state_machine.complete(success=False, reason="No execution plan or empty plan")
             return
         
         try:
@@ -519,7 +593,7 @@ class IntelligentAgent:
             all_success = True
             
             for step in context.execution_plan.steps:
-                logger.debug(f"Executing step {step.step_number}: {step.tool_name}")
+                print(f"   🔧 Step {step.step_number}: {step.tool_name} ({step.description})")
                 
                 # Check if tool is allowed
                 if not self._is_tool_allowed(step.tool_name):
@@ -532,10 +606,18 @@ class IntelligentAgent:
                     all_success = False
                     continue
                 
+                # Resolve __GENERATE__ placeholders in parameters
+                params = dict(step.parameters)
+                for key, value in params.items():
+                    if value == "__GENERATE__":
+                        print(f"      Generating content for '{key}'...")
+                        params[key] = await self._generate_content(context, step)
+                        print(f"      Generated {len(params[key])} chars")
+                
                 # Execute tool
                 tool_result = await self.executor.execute(
                     tool_name=step.tool_name,
-                    parameters=step.parameters,
+                    parameters=params,
                     agent_id=self.agent_id,
                     ticket_id=context.ticket.ticket_id
                 )
@@ -550,9 +632,11 @@ class IntelligentAgent:
                 )
                 results.append(exec_result)
                 
-                if not tool_result.success:
+                if tool_result.success:
+                    print(f"      ✓ Success: {str(tool_result.data)[:150]}")
+                else:
                     all_success = False
-                    logger.warning(f"Step {step.step_number} failed: {tool_result.error}")
+                    print(f"      ✗ Failed: {tool_result.error}")
                     
                     # Check if we should continue or abort
                     if step.condition != "continue_on_error":
@@ -586,29 +670,74 @@ class IntelligentAgent:
     # PROMPT BUILDERS
     # ==================================================================
     
-    def _get_system_prompt(self) -> str:
-        """Get the system prompt for the LLM."""
-        return f"""Du bist {self.agent_id}, ein KI-Entwickler-Agent für Mohami.
-
-DEINE AUFGABE:
+    def _get_system_prompt(self, context: Optional[AgentContext] = None) -> str:
+        """Build the system prompt from identity files + operational rules.
+        
+        Layers (in order of LLM weight):
+        1. Identity (soul.md + rules.md) -- who am I, what are my constraints
+        2. Operational workflow -- how to use tools, PR workflow
+        3. Knowledge (knowledge.md) -- what do I know about my tech stack
+        4. Memories (memories/*.md) -- curated learnings from the operator
+        5. Customer context (customers/{id}/) -- per-customer specifics
+        6. Session metadata -- customer_id, agent_id
+        """
+        customer_id = (
+            context.ticket.customer_id if context and context.ticket.customer_id
+            else self.config.customer_id
+        )
+        
+        parts = []
+        
+        # --- Layer 1: Identity (from soul.md + rules.md) ---
+        if self.identity_prompt:
+            parts.append(self.identity_prompt)
+        else:
+            parts.append(f"Du bist {self.agent_id}, ein KI-Entwickler-Agent.")
+        
+        # --- Layer 2: Operational workflow (hardcoded system logic) ---
+        parts.append("""DEINE AUFGABE:
 1. Analysiere Tickets und entscheide welche Tools du brauchst
 2. Erstelle detaillierte Pläne zur Umsetzung
 3. Führe die Pläne aus und adaptiere bei Bedarf
 
-REGELN:
-- Antworte auf DEUTSCH
-- Sei präzise und technisch korrekt
-- Nutze die verfügbaren Tools selbstständig
-- Wenn etwas unklar ist, frage nach (needs_clarification: true)
+PFLICHT-WORKFLOW FÜR CODE-ÄNDERUNGEN:
+Jede Code-Änderung MUSS über einen Pull Request laufen. Folge IMMER diesem Workflow:
+1. github_get_repo_info → Default-Branch ermitteln
+2. github_create_branch → Feature-Branch erstellen (Name: "mohami/ticket-<kurzer-name>")
+3. github_write_file → Dateien auf den Feature-Branch schreiben (jeweils mit commit message)
+4. github_create_pr → Pull Request vom Feature-Branch zum Default-Branch erstellen
 
-KUNDE: {self.config.customer_id}
-AGENT: {self.agent_id}
-"""
+Nutze NIEMALS file_write für Änderungen an Kunden-Repositories. file_write ist NUR für temporäre lokale Dateien.
+Wenn etwas unklar ist, frage nach (needs_clarification: true).""")
+        
+        # --- Layer 3: Knowledge (from knowledge.md) ---
+        if self.knowledge:
+            parts.append(f"## DEIN WISSEN\n{self.knowledge[:3000]}")
+        
+        # --- Layer 4: Memories (from memories/*.md) ---
+        if self.memories:
+            parts.append(f"## DEINE ERINNERUNGEN\n{self.memories[:2000]}")
+        
+        # --- Layer 5: Customer context (from customers/{id}/) ---
+        if context and context.ticket.customer_id and self._config_loader:
+            try:
+                customer_ctx = self._config_loader.load_customer_context(
+                    self.agent_id, context.ticket.customer_id
+                )
+                if customer_ctx:
+                    parts.append(f"## KUNDENKONTEXT ({context.ticket.customer_id})\n{customer_ctx[:1500]}")
+            except Exception as e:
+                logger.debug(f"Could not load customer context: {e}")
+        
+        # --- Layer 6: Session metadata ---
+        parts.append(f"KUNDE: {customer_id}\nAGENT: {self.agent_id}")
+        
+        return "\n\n".join(parts)
     
     def _build_reasoning_prompt(
         self, 
         context: AgentContext, 
-        tools_schemas: List[Dict]
+        tools_schemas: Optional[List[Dict]] = None
     ) -> str:
         """Build the prompt for the reasoning phase."""
         
@@ -630,12 +759,16 @@ AGENT: {self.agent_id}
             for learning in context.relevant_learnings[:3]:
                 learnings_text += f"- {learning.get('content', '')[:200]}...\n"
         
+        repo_text = f"Repository: {context.ticket.repository}" if context.ticket.repository else "Repository: (nicht angegeben)"
+        
         prompt = f"""
 Analysiere dieses Ticket und entscheide wie du vorgehst.
 
 === TICKET ===
 ID: {context.ticket.ticket_id}
 Titel: {context.ticket.title}
+{repo_text}
+Kunde: {context.ticket.customer_id or "unbekannt"}
 Beschreibung:
 {context.ticket.description}
 
@@ -644,7 +777,7 @@ Beschreibung:
 {learnings_text}
 
 === VERFÜGBARE TOOLS ===
-{json.dumps(tools_schemas, indent=2, default=str)[:2000]}
+{self.tools.get_formatted_tools_prompt()}
 
 === DEINE AUFGABE ===
 1. Analysiere das Ticket: Was will der User?
@@ -669,47 +802,68 @@ Wenn etwas unklar ist, setze needs_clarification auf true und stelle eine konkre
         """Build the prompt for the planning phase."""
         
         prompt = f"""
-Erstelle einen detaillierten Ausführungsplan für dieses Ticket.
+Erstelle einen Ausführungsplan für dieses Ticket.
 
 === TICKET ===
 Titel: {context.ticket.title}
-Beschreibung:
-{context.ticket.description}
+Beschreibung: {context.ticket.description}
 
-=== DEIN VERSTÄNDNIS ===
+=== VERSTÄNDNIS ===
 {context.understanding}
-
-=== GEPLANTE TOOLS ===
-{context.needed_tools}
 
 === ANSATZ ===
 {context.approach}
 
 === VERFÜGBARE TOOLS ===
-{json.dumps(self.tools.get_schemas_for_llm(format="generic"), indent=2, default=str)[:1500]}
+{self.tools.get_formatted_tools_prompt()}
 
-=== DEINE AUFGABE ===
-Erstelle einen Schritt-für-Schritt Plan mit spezifischen Tool-Aufrufen.
+=== AUFGABE ===
+Erstelle einen JSON-Plan mit Tool-Aufrufen.
 
-Antworte als JSON:
+PFLICHT-WORKFLOW für Code-Änderungen:
+1. github_get_repo_info → Default-Branch ermitteln
+2. github_create_branch → Feature-Branch "mohami/ticket-<name>"
+3. github_write_file → Dateien schreiben (EINE Datei pro Step)
+4. github_create_pr → Pull Request erstellen
+
+KRITISCHE JSON-REGELN:
+- Für "content" Parameter (Dateiinhalte): Nutze den Platzhalter "__GENERATE__"
+- Beschreibe in "description" WAS der Inhalt sein soll
+- Der tatsächliche Inhalt wird automatisch generiert
+- Nutze github_write_file (NICHT file_write) für Repository-Änderungen
+- Repository: {context.ticket.repository}
+
+Antworte NUR mit diesem JSON (keine Erklärung):
+```json
 {{
     "steps": [
         {{
             "step_number": 1,
-            "tool": "tool_name",
-            "parameters": {{"param1": "value1"}},
-            "description": "Was dieser Schritt macht",
-            "depends_on": null,
-            "condition": null
+            "tool": "github_get_repo_info",
+            "parameters": {{"repo": "{context.ticket.repository}"}},
+            "description": "Default-Branch ermitteln"
+        }},
+        {{
+            "step_number": 2,
+            "tool": "github_create_branch",
+            "parameters": {{"repo": "{context.ticket.repository}", "branch_name": "mohami/ticket-beispiel", "from_branch": "main"}},
+            "description": "Feature-Branch erstellen"
+        }},
+        {{
+            "step_number": 3,
+            "tool": "github_write_file",
+            "parameters": {{"repo": "{context.ticket.repository}", "path": "datei.md", "content": "__GENERATE__", "branch": "mohami/ticket-beispiel", "message": "Add datei.md"}},
+            "description": "Datei mit XYZ Inhalt erstellen"
+        }},
+        {{
+            "step_number": 4,
+            "tool": "github_create_pr",
+            "parameters": {{"repo": "{context.ticket.repository}", "title": "Ticket: Beschreibung", "body": "...", "head_branch": "mohami/ticket-beispiel", "base_branch": "main"}},
+            "description": "Pull Request erstellen"
         }}
-    ],
-    "estimated_steps": 5
+    ]
 }}
-
-Wichtig:
-- Jeder Schritt muss ein verfügbares Tool verwenden
-- Parameter müssen zum Tool-Schema passen
-- Pfade müssen absolut oder relativ zum Workspace sein
+```
 """
         return prompt
     
@@ -739,20 +893,187 @@ Wichtig:
             return tool_name in self.config.allowed_tools
         return True
     
-    def _create_fallback_plan(self, context: AgentContext) -> ToolExecutionPlan:
-        """Create a fallback plan if LLM planning fails."""
+    async def _generate_content(self, context: AgentContext, step: ToolExecutionStep) -> str:
+        """Generate file content via LLM for __GENERATE__ placeholders.
+        
+        Reads existing file from GitHub first (if it exists) so the LLM
+        can modify rather than replace.
+        """
+        file_path = step.parameters.get("path", "unknown")
+        repo = step.parameters.get("repo", context.ticket.repository)
+        branch = step.parameters.get("branch", "main")
+        
+        existing_content = ""
+        if repo:
+            try:
+                read_result = await self.executor.execute(
+                    "github_read_file",
+                    {"repo": repo, "path": file_path, "branch": branch},
+                    agent_id=self.agent_id,
+                    ticket_id=context.ticket.ticket_id,
+                )
+                if read_result.success and read_result.data:
+                    existing_content = read_result.data.get("content", "")
+                    print(f"      Read existing file: {len(existing_content)} chars")
+            except Exception:
+                pass
+        
+        existing_section = ""
+        if existing_content:
+            existing_section = f"""
+BESTEHENDER INHALT der Datei (MUSS beibehalten werden, nur ergänzen/anpassen):
+---
+{existing_content}
+---
+WICHTIG: Behalte den bestehenden Inhalt bei und passe ihn nur gemäß der Aufgabe an."""
+        else:
+            existing_section = "\nDie Datei existiert noch nicht. Erstelle sie komplett neu."
+        
+        prompt = f"""Generiere den KOMPLETTEN Inhalt für die Datei '{file_path}'.
+
+Ticket: {context.ticket.title}
+Beschreibung: {context.ticket.description}
+Repository: {context.ticket.repository}
+Step-Beschreibung: {step.description}
+
+Verständnis: {context.understanding[:300] if context.understanding else ''}
+{existing_section}
+
+Antworte NUR mit dem Dateiinhalt. Keine Erklärung, kein Markdown-Code-Block, nur den reinen Inhalt der Datei."""
+        
+        try:
+            messages = [
+                Message(role="system", content="Du bist ein Entwickler. Generiere NUR den angeforderten Dateiinhalt. Keine Erklärungen. Wenn eine bestehende Datei angegeben ist, behalte deren Inhalt bei und ergänze/ändere nur was nötig ist."),
+                Message(role="user", content=prompt),
+            ]
+            response = await self.llm.chat(messages=messages, temperature=0.3, max_tokens=4096)
+            content = response.content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:])
+                if content.endswith("```"):
+                    content = content[:-3].rstrip()
+            return content
+        except Exception as e:
+            print(f"      ⚠️  Content generation failed: {e}")
+            return f"# {context.ticket.title}\n\nContent generation failed. Please edit manually."
+    
+    def _parse_plan_response(self, raw_response: str, context: AgentContext) -> ToolExecutionPlan:
+        """Parse the LLM plan response with robust JSON handling."""
+        import re
+        
+        content = raw_response
+        
+        # Extract JSON from markdown code blocks
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            parts = content.split("```")
+            if len(parts) >= 3:
+                content = parts[1]
+        
+        # Try direct parse first
+        try:
+            plan_data = json.loads(content.strip())
+            return self._build_plan_from_data(plan_data)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to repair: replace unescaped newlines inside strings
+        try:
+            repaired = re.sub(r'(?<=": ")([^"]*?)(?=")', 
+                            lambda m: m.group(0).replace('\n', '\\n'), 
+                            content)
+            plan_data = json.loads(repaired.strip())
+            print("      JSON repaired successfully")
+            return self._build_plan_from_data(plan_data)
+        except (json.JSONDecodeError, re.error):
+            pass
+        
+        # Try to extract individual step objects via regex
+        try:
+            step_pattern = r'\{[^{}]*"tool"\s*:\s*"([^"]+)"[^{}]*"parameters"\s*:\s*(\{[^{}]*\})[^{}]*"description"\s*:\s*"([^"]*)"[^{}]*\}'
+            matches = re.findall(step_pattern, raw_response, re.DOTALL)
+            if matches:
+                steps = []
+                for i, (tool, params_str, desc) in enumerate(matches, 1):
+                    try:
+                        params = json.loads(params_str)
+                    except json.JSONDecodeError:
+                        params = {}
+                    steps.append(ToolExecutionStep(
+                        step_number=i, tool_name=tool,
+                        parameters=params, description=desc,
+                    ))
+                print(f"      Extracted {len(steps)} steps via regex")
+                return ToolExecutionPlan(steps=steps, estimated_steps=len(steps))
+        except Exception:
+            pass
+        
+        # Last resort: build a standard GitHub workflow plan from context
+        print("      ⚠️  All parsing failed, creating standard GitHub workflow plan")
+        return self._create_standard_github_plan(context)
+    
+    def _build_plan_from_data(self, plan_data: dict) -> ToolExecutionPlan:
+        """Build a ToolExecutionPlan from parsed JSON data."""
+        steps_data = plan_data.get("steps", [])
+        print(f"   📋 Plan: {len(steps_data)} steps")
+        for s in steps_data:
+            print(f"      → {s.get('tool', '?')}: {s.get('description', '')[:80]}")
+        
         steps = []
-        
-        # Add basic file exploration steps
-        if context.workspace_path:
+        for i, step_data in enumerate(steps_data, 1):
             steps.append(ToolExecutionStep(
-                step_number=1,
-                tool_name="file_list",
-                parameters={"path": context.workspace_path, "recursive": False},
-                description="Explore workspace structure",
+                step_number=i,
+                tool_name=step_data.get("tool"),
+                parameters=step_data.get("parameters", {}),
+                description=step_data.get("description", ""),
+                depends_on=step_data.get("depends_on"),
+                condition=step_data.get("condition"),
             ))
+        return ToolExecutionPlan(steps=steps, estimated_steps=len(steps))
+    
+    def _create_standard_github_plan(self, context: AgentContext) -> ToolExecutionPlan:
+        """Create a standard GitHub workflow plan as last-resort fallback."""
+        repo = context.ticket.repository
+        if not repo:
+            return ToolExecutionPlan(steps=[])
         
-        return ToolExecutionPlan(steps=steps)
+        branch_name = f"mohami/ticket-{context.ticket.ticket_id[:8]}"
+        title_slug = context.ticket.title.lower().replace(" ", "-")[:30]
+        
+        steps = [
+            ToolExecutionStep(
+                step_number=1, tool_name="github_get_repo_info",
+                parameters={"repo": repo},
+                description="Default-Branch ermitteln",
+            ),
+            ToolExecutionStep(
+                step_number=2, tool_name="github_create_branch",
+                parameters={"repo": repo, "branch_name": branch_name, "from_branch": "main"},
+                description="Feature-Branch erstellen",
+            ),
+            ToolExecutionStep(
+                step_number=3, tool_name="github_write_file",
+                parameters={
+                    "repo": repo, "path": f"{title_slug}.md",
+                    "content": "__GENERATE__", "branch": branch_name,
+                    "message": f"Add {context.ticket.title}",
+                },
+                description=f"Datei erstellen: {context.ticket.title}",
+            ),
+            ToolExecutionStep(
+                step_number=4, tool_name="github_create_pr",
+                parameters={
+                    "repo": repo, "title": f"Mohami: {context.ticket.title}",
+                    "body": context.understanding[:500] if context.understanding else context.ticket.description,
+                    "head_branch": branch_name, "base_branch": "main",
+                },
+                description="Pull Request erstellen",
+            ),
+        ]
+        print(f"   📋 Fallback Plan: {len(steps)} steps (standard GitHub workflow)")
+        return ToolExecutionPlan(steps=steps, estimated_steps=len(steps))
     
     def _create_result(self, context: AgentContext, success: bool) -> AgentResult:
         """Create the final result."""
@@ -795,13 +1116,29 @@ Wichtig:
                 episode_type="resolution" if success else "error",
                 metadata={
                     "approach": context.approach,
-                    "tools_used": context.needed_tools,
+                    "tools_used": ",".join(context.needed_tools) if context.needed_tools else "",
                     "iterations": context.iteration,
                 }
             )
             self.memory.record_learning(episode)
         
         return result
+    
+    # ==================================================================
+    # KANBAN INTEGRATION
+    # ==================================================================
+    
+    async def _post_comment(self, ticket_id: str, content: str):
+        """Post a comment to a ticket if CommentCRUD is available."""
+        if not self.comment_crud:
+            logger.debug(f"No comment_crud, skipping comment on {ticket_id}")
+            return
+        try:
+            from ..kanban.schemas import CommentCreate
+            comment = CommentCreate(author=self.agent_id, content=content)
+            await self.comment_crud.create(ticket_id, comment)
+        except Exception as e:
+            logger.warning(f"Failed to post comment: {e}")
     
     # ==================================================================
     # UTILITY METHODS

@@ -48,7 +48,23 @@ function App() {
     setSelectedTicket(ticket);
   };
 
+  const ALLOWED_MOVES = {
+    backlog:        ['in_progress'],
+    in_progress:    ['backlog'],
+    clarification:  [],
+    testing:        ['done', 'in_progress'],
+    done:           [],
+  };
+
   const handleTicketMove = async (ticketId, newStatus) => {
+    const ticket = tickets.find(t => t.id === ticketId);
+    if (!ticket) return;
+
+    const allowed = ALLOWED_MOVES[ticket.status] || [];
+    if (!allowed.includes(newStatus)) {
+      return;
+    }
+
     try {
       const response = await fetch(`${API_URL}/tickets/${ticketId}`, {
         method: 'PATCH',
@@ -69,12 +85,21 @@ function App() {
 
   const handleCreateTicket = async (ticketData) => {
     try {
+      const { agent, ...createData } = ticketData;
       const response = await fetch(`${API_URL}/tickets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ticketData),
+        body: JSON.stringify(createData),
       });
       if (response.ok) {
+        const created = await response.json();
+        if (agent) {
+          await fetch(`${API_URL}/tickets/${created.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent }),
+          });
+        }
         fetchTickets();
         setShowNewTicket(false);
       }
