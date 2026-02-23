@@ -13,7 +13,7 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: docker/Dockerfile.backend
     container_name: ki-backend
     ports:
       - "8000:8000"
@@ -58,7 +58,7 @@ services:
   agent-worker:
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: docker/Dockerfile.worker
     container_name: ki-agent
     volumes:
       - ~/ki-data/kanban.db:/app/kanban.db  # Außerhalb des Repos!
