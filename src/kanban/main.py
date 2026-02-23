@@ -23,7 +23,7 @@ from .schemas import (
     ChatMessageRequest, ChatMessageResponse,
     # Phase 1: Learning System Schemas
     TicketApproval, ChangeRequest, IterationRecord, LearningRecordResponse,
-    TicketUpdateEnhanced,
+    TicketUpdateEnhanced, TicketResponseEnhanced,
 )
 from .crud import (
     create_ticket, get_ticket, get_ticket_with_comments, get_tickets,
