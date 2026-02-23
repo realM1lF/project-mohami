@@ -8,16 +8,14 @@
 
 ## 🚨 KRITISCH (Sofort beheben)
 
-### 1. Exposed API Keys in .env
-- **Status:** 🔴 SECURITY BREACH
-- **Ort:** `/.env`
-- **Beschreibung:** Echte API-Keys (GitHub, Kimi, OpenRouter) wurden committed
-- **Impact:** Tokens können von jedem mit Repo-Zugang gelesen werden
-- **Lösung:**
-  1. SOFORT alle Tokens rotieren/revoken
-  2. `git rm --cached .env && git commit -m "remove .env"`
-  3. `.env.example` mit Platzhaltern erstellen
-  4. In `.gitignore` prüfen (bereits vorhanden)
+### 1. Fehlende .env.example
+- **Status:** 🟡 DOCUMENTATION
+- **Ort:** Root-Verzeichnis
+- **Beschreibung:** Keine Beispiel-Umgebungsdatei vorhanden
+- **Impact:** Neue Entwickler wissen nicht welche Variablen benötigt werden
+- **Lösung:** 
+  - ✅ `.env.example` erstellt (siehe Root)
+  - In README.md dokumentieren
 
 ### 2. Docker Container läuft als root
 - **Status:** 🔴 SECURITY
@@ -345,8 +343,8 @@ src/agents/
 
 ## 🛡️ Security-Checkliste
 
-- [ ] Alle API-Keys rotieren
-- [ ] `.env` aus Git-History entfernen
+- [x] `.env` ist in `.gitignore` (nicht im Repo)
+- [x] `.env.example` erstellt
 - [ ] Non-Root-User in Docker
 - [ ] `shell=True` entfernt
 - [ ] Input-Sanitization für alle User-Inputs
