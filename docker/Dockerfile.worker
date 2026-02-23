@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY src/ ./src/
 COPY agent_worker.py .
-COPY load_memories.py .
+COPY scripts/ ./scripts/
 
 # Create directory for database
 RUN mkdir -p /app/data
