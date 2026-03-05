@@ -1,3 +1,6 @@
 [submodule "wordpress-agent"]
 	path = wordpress-agent
 	url = git@github.com:realM1lF/wordpress-agent.git
+[submodule "levi-ai-buddy-website"]
+	path = levi-ai-buddy-website
+	url = git@github.com:realM1lF/levi-ai-buddy-website.git
